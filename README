@@ -1,152 +1,188 @@
-flowchart TD
+🚀 Azure Serverless Sentiment Analysis Pipeline
 
-subgraph TITLE[Azure Serverless Sentiment Analysis Pipeline]
-end
+A fully serverless, event-driven, and scalable sentiment analysis pipeline built with Azure Functions, Container Apps, Blob Storage, and Application Insights.
 
-%% -------------------------
-%% ARCHITECTURE DIAGRAM
-%% -------------------------
+📌 Features
 
-subgraph ARCHI[Architecture]
-direction LR
+🔄 Event-driven CSV ingestion (Blob Trigger)
 
-U[User Upload<br>(Portal / az CLI / SDK)] --> A
+📦 Batch processing with configurable chunk sizes
 
-subgraph Storage[Azure Blob Storage]
-  A[input/ (CSV files)]
-  O[output/ (JSON chunks)]
-end
+⚡ FastAPI ML inference served via Azure Container Apps
 
-A -->|Blob Trigger| F[Azure Function App<br>process_blob()]
+☁️ Fully serverless & scalable architecture
 
-F -->|HTTP POST /predict<br>(batches)| C[Container App API<br>FastAPI + Transformers]
+📊 Centralized logging & monitoring (Application Insights)
 
-C -->|JSON predictions| F
+🧹 Clean, modular repository structure
 
-F -->|Write output chunks| O
-F -->|Logs & Traces| AI[Application Insights]
+🧭 Overview
 
-AI --> Dash[Dashboards, Logs,<br>Alerts, Metrics]
-end
+A CSV file uploaded to Azure Blob Storage automatically triggers an Azure Function.
+The function:
 
-%% -------------------------
-%% REPO STRUCTURE
-%% -------------------------
+Reads and streams the file
 
-subgraph REPO[Repository Structure]
-direction TB
-R0[.]
-R1[├─ api/]
-R2[│   ├─ app.py]
-R3[│   ├─ inference.py]
-R4[│   ├─ Dockerfile]
-R5[│   └─ requirements.txt]
-R6[├─ function/]
-R7[│   ├─ function_app.py]
-R8[│   ├─ host.json]
-R9[│   ├─ local.settings.json]
-R10[│   └─ requirements.txt]
-R11[├─ samples/]
-R12[│   └─ demo_small.csv]
-R13[├─ docs/]
-R14[│   └─ architecture.png]
-R15[└─ .github/workflows/]
-R16[    └─ build-push.yml]
-end
+Splits rows into batches (CHUNK_SIZE)
 
-%% -------------------------
-%% DEPLOYMENT
-%% -------------------------
+Calls the ML API (FastAPI in a container)
 
-subgraph DEPLOY[Setup Instructions]
-direction TB
-D1["1. Build & Push Image:
-docker buildx build --platform linux/amd64 -t \$ACR_SERVER/mlapi:v1 -f api/Dockerfile .
-docker push \$ACR_SERVER/mlapi:v1"]
+Writes output JSON chunks + a manifest file
 
-D2["2. Deploy Container App:
-az containerapp create \\
-  -g rg-mlserverless-dev -n ca-mlapi-dev \\
-  --environment cae-mlserverless-dev \\
-  --image \$ACR_SERVER/mlapi:v1 \\
-  --ingress external --target-port 8000 \\
-  --min-replicas 1 --cpu 1 --memory 2Gi \\
-  --registry-server \$ACR_SERVER \\
-  --registry-username \$ACR_USER \\
-  --registry-password \$ACR_PASS"]
+Pushes logs/metrics to Application Insights
 
-D3["3. Create Blob Containers:
+This architecture is ideal for large-scale batch ML predictions in a serverless environment.
+
+🏗 Architecture Diagram (Mermaid)
+
+flowchart LR
+
+  U[User Upload<br>(Portal / az CLI / SDK)] --> A
+
+  subgraph Storage[Azure Blob Storage]
+    A[input/ (CSV files)]
+    O[output/ (JSON chunks)]
+  end
+
+  A -->|Blob Trigger| F[Azure Function App<br>process_blob()]
+
+  F -->|HTTP POST /predict<br>(CHUNK_SIZE batches)| C[Azure Container App<br>FastAPI ML API]
+
+  C -->|JSON predictions| F
+
+  F -->|Write output chunks| O
+  F -->|Logs & Traces| AI[Application Insights]
+
+  AI --> Dash[Dashboards · Logs · Alerts · Metrics]
+
+
+📁 Repository Structure
+
+.
+├── api/
+│   ├── app.py
+│   ├── inference.py
+│   ├── Dockerfile
+│   └── requirements.txt
+│
+├── function/
+│   ├── function_app.py
+│   ├── host.json
+│   ├── local.settings.json
+│   └── requirements.txt
+│
+├── samples/
+│   └── demo_small.csv
+│
+├── docs/
+│   └── architecture.png
+│
+└── .github/workflows/
+    └── build-push.yml
+
+🔧 Setup Instructions (Full Azure Deployment)
+1️⃣ Build & Push the ML API Image
+docker buildx build --platform linux/amd64 \
+  -t $ACR_SERVER/mlapi:v1 \
+  -f api/Dockerfile .
+
+docker push $ACR_SERVER/mlapi:v1
+
+2️⃣ Deploy the Azure Container App (FastAPI Model)
+az containerapp create \
+  -g rg-mlserverless-dev \
+  -n ca-mlapi-dev \
+  --environment cae-mlserverless-dev \
+  --image $ACR_SERVER/mlapi:v1 \
+  --ingress external --target-port 8000 \
+  --min-replicas 1 --cpu 1 --memory 2Gi \
+  --registry-server $ACR_SERVER \
+  --registry-username $ACR_USER \
+  --registry-password $ACR_PASS
+
+3️⃣ Create Blob Storage Containers
 az storage container create --account-name <storage> --name input
-az storage container create --account-name <storage> --name output"]
+az storage container create --account-name <storage> --name output
 
-D4["4. Deploy Azure Function:
+4️⃣ Deploy the Azure Function
 cd function
-func azure functionapp publish func-mlserverless-dev --build remote"]
+func azure functionapp publish func-mlserverless-dev --build remote
 
-D5["5. Configure Settings:
-az functionapp config appsettings set \\
-  -g rg-mlserverless-dev -n func-mlserverless-dev \\
-  --settings API_URL='https://ca-mlapi-dev.<id>.francecentral.azurecontainerapps.io/predict' \\
-             CHUNK_SIZE=20 TIMEOUT_SEC=180 OUTPUT_CONTAINER=output"]
-end
+5️⃣ Configure Function App Settings
+az functionapp config appsettings set \
+  -g rg-mlserverless-dev \
+  -n func-mlserverless-dev \
+  --settings \
+    API_URL="https://ca-mlapi-dev.<id>.francecentral.azurecontainerapps.io/predict" \
+    CHUNK_SIZE=20 \
+    TIMEOUT_SEC=180 \
+    OUTPUT_CONTAINER=output
 
-%% -------------------------
-%% TESTING
-%% -------------------------
+🧪 Testing the Pipeline
+Small Test File
+az storage blob upload \
+  --account-name <storage> \
+  --container-name input \
+  --file samples/demo_small.csv \
+  --name demo_small.csv
 
-subgraph TEST[Testing]
-direction TB
 
-T1["Small File:
-az storage blob upload \\
-  --account-name <storage> \\
-  --container-name input \\
-  --file samples/demo_small.csv \\
-  --name demo_small.csv"]
+Expected output:
 
-T2["Expected Output:
 demo_small.csv.0000.json
-demo_small.csv.manifest.json"]
+demo_small.csv.manifest.json
 
-T3["Large CSV:
-az storage blob upload \\
-  --account-name <storage> \\
-  --container-name input \\
-  --file big.csv \\
-  --name input.csv"]
-end
+Large CSV
+az storage blob upload \
+  --account-name <storage> \
+  --container-name input \
+  --file big.csv \
+  --name input.csv
 
-%% -------------------------
-%% MONITORING
-%% -------------------------
 
-subgraph MONITOR[Monitoring (Kusto)]
-direction TB
+Pipeline behavior:
 
-M1["View Logs:
-traces | where timestamp > ago(2h)"]
-M2["API Requests:
-requests | where timestamp > ago(2h)"]
-M3["Exceptions:
-exceptions | where timestamp > ago(2h)"]
-end
+Streams CSV rows
 
-%% -------------------------
-%% ERRORS
-%% -------------------------
+Splits into batches
 
-subgraph ERRORS[Error Handling]
-E1["Timeout → increase TIMEOUT_SEC"]
-E2["Large batches → reduce CHUNK_SIZE"]
-E3["Empty CSV → write minimal JSON"]
-E4["API down → write error JSON chunk"]
-end
+Sends to FastAPI ML model
 
-%% -------------------------
-%% CLEANUP
-%% -------------------------
+Writes JSON chunks
 
-subgraph CLEANUP[Cleanup]
-C1["az group delete -n rg-mlserverless-dev"]
-end
+Generates manifest file
+
+Tune if needed:
+
+CHUNK_SIZE=10
+TIMEOUT_SEC=240
+
+📊 Monitoring (Application Insights)
+
+Function logs
+
+traces
+| where timestamp > ago(2h)
+| order by timestamp desc
+
+
+API request logs
+
+requests
+| where timestamp > ago(2h)
+| order by timestamp desc
+
+
+Exceptions
+
+exceptions
+| where timestamp > ago(2h)
+
+🛠 Error Handling
+Issue	Fix
+⏱ Timeout	Increase TIMEOUT_SEC
+📦 Batch too large	Reduce CHUNK_SIZE
+📄 Empty CSV	Writes minimal manifest
+🔴 API down	Creates error chunk & continues
+
 
