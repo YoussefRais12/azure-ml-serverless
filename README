@@ -1,0 +1,164 @@
+flowchart LR
+  subgraph Azure
+    A[Azure Blob Storage\ncontainer: input/] -->|Blob Trigger| F[Azure Function\nprocess_blob()]
+    F -->|HTTP POST /predict (batches)| C[Container App API\n(FastAPI + transformers)]
+    C -->|JSON results| F
+    F -->|write| O[Blob Storage\ncontainer: output/]
+    F -->|logs| AI[Application Insights]
+  end
+  U[Uploader (Portal / az / SDK)] --> A
+  AI --> Dash[Logs + Alerts\n(requests, traces, exceptions)]
+
+
+# Serverless ML on Azure: Blob → Function → Container App → Blob
+
+## Overview
+Event-driven pipeline:
+1) Upload CSV to `input/` in Azure Blob Storage.
+2) An Azure Function (`process_blob`) is triggered, reads the CSV in batches, calls a containerized ML API on Azure Container Apps, and writes JSON chunks to `output/`.
+3) You can monitor the whole flow in Application Insights.
+
+## Repo structure
+.
+├─ api/ # containerized ML API
+│ ├─ app.py # FastAPI /predict and /health
+│ ├─ inference.py # sentiment pipeline (transformers)
+│ ├─ requirements.txt # torch, transformers, fastapi, uvicorn
+│ └─ Dockerfile
+├─ function/ # Azure Function (Blob trigger)
+│ ├─ function_app.py # (v2 model) OR function_app.py + process_blob folder (v1)
+│ ├─ function_app.py # reads CSV, batches, calls API, writes JSON
+│ ├─ host.json / local.settings.json
+│ └─ requirements.txt # azure-functions, requests, azure-storage-blob
+├─ .github/workflows/
+│ └─ build-push.yml # (optional) CI to build/push image
+├─ samples/
+│ └─ demo_small.csv # 5-row test file
+└─ README.md
+
+
+## Prerequisites
+- Azure CLI (`az`), Azure Functions Core Tools (`func`), Docker (or Rancher Desktop)
+- Logged in: `az login`
+- Subscription set: `az account set -s "<your subscription name>"`
+
+## One-time Azure setup (already done in your env)
+- Resource group, ACR, Container App Environment, Storage, App Insights.
+- Build & push API image to ACR (you did), then create Container App with **linux/amd64** image.
+- Create Function App (Linux Consumption) and publish code.
+
+## App settings (Function)
+Set knobs for reliable large-batch processing:
+```bash
+az functionapp config appsettings set -g rg-mlserverless-dev -n func-mlserverless-dev \
+  --settings \
+    API_URL="https://ca-mlapi-dev.proudwater-65e7e8cf.francecentral.azurecontainerapps.io/predict" \
+    CHUNK_SIZE=20 \
+    TIMEOUT_SEC=180 \
+    OUTPUT_CONTAINER=output
+
+## Scale the API (Container App)
+az containerapp update -g rg-mlserverless-dev -n ca-mlapi-dev --cpu 1 --memory 2Gi --min-replicas 1
+
+
+##
+Deploy / Update the Function
+
+cd function
+# ensure requirements include azure-storage-blob
+grep -q "azure-storage-blob" requirements.txt || echo "azure-storage-blob>=12.20.0" >> requirements.txt
+func azure functionapp publish func-mlserverless-dev --build remote
+
+Testing
+1) Small smoke test
+
+Upload samples/demo_small.csv to input/:
+
+az storage blob upload \
+  --account-name <your_storage> \
+  --container-name input \
+  --file samples/demo_small.csv \
+  --name demo_small.csv \
+  --auth-mode login
+
+  Expected: file(s) appear in output/ (e.g., demo_small.csv.0000.json) with predictions + a manifest.
+
+2) Large CSV
+
+Just drop the big CSV into input/. The function will:
+
+Read streaming rows
+
+Slice into chunks of CHUNK_SIZE
+
+POST to API_URL with timeout TIMEOUT_SEC
+
+Write per-chunk outputs and a final manifest to output/
+
+If it stalls, reduce CHUNK_SIZE (e.g., 10) and increase TIMEOUT_SEC (e.g., 240).
+
+Monitoring & Logs
+
+Open Application Insights → Logs and run:
+
+traces
+| where timestamp > ago(2h)
+| where message has "[CFG]" or message has "[INFO]" or message has "[OK]" or message has "[ERR]" or message has "[DONE]"
+| order by timestamp desc
+
+
+Also useful:
+
+requests | where timestamp > ago(2h) | order by timestamp desc
+exceptions | where timestamp > ago(2h)
+
+Error handling
+
+If a chunk times out: a JSON error object is written so you see partial progress.
+
+If CSV has no parsable rows: the function writes a minimal JSON with "input_rows": 0.
+
+Cleanup
+az group delete -n rg-mlserverless-dev
+
+
+---
+
+# 3) Setup instructions for a full Azure deployment (condensed step list)
+
+1) **Build API image (amd64) and push to ACR**
+```bash
+docker buildx build --platform linux/amd64 -t $ACR_SERVER/mlapi:v1-amd64 -f api/Dockerfile .
+docker push $ACR_SERVER/mlapi:v1-amd64
+
+
+Create/Update Container App (point to that image, exposed on 8000, min 1 replica, 1 CPU/2Gi)
+
+az containerapp create \
+  -g rg-mlserverless-dev -n ca-mlapi-dev --environment cae-mlserverless-dev \
+  --image $ACR_SERVER/mlapi:v1-amd64 \
+  --ingress external --target-port 8000 \
+  --registry-server $ACR_SERVER --registry-username $ACR_USER --registry-password $ACR_PWD \
+  --min-replicas 1 --cpu 1 --memory 2Gi
+
+
+Create Storage containers
+
+az storage container create --account-name <storage> --name input  --auth-mode login
+az storage container create --account-name <storage> --name output --auth-mode login
+
+
+Create Function App (Linux / Python 3.12) & publish
+
+az functionapp create ...  # (done already)
+cd function && func azure functionapp publish func-mlserverless-dev --build remote
+
+
+Configure function app settings
+
+az functionapp config appsettings set -g rg-mlserverless-dev -n func-mlserverless-dev \
+  --settings API_URL="https://<your-ca-fqdn>/predict" CHUNK_SIZE=20 TIMEOUT_SEC=180 OUTPUT_CONTAINER=output
+
+
+Smoke test
+Upload samples/demo_small.csv, observe JSON in output/, and verify Application Insights logs.
